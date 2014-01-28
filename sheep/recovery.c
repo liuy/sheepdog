@@ -54,6 +54,7 @@ struct recovery_info {
 	uint32_t epoch;
 	uint32_t tgt_epoch;
 	uint64_t done;
+	uint64_t next;
 
 	/*
 	 * true when automatic recovery is disabled
@@ -507,6 +508,8 @@ static int do_recover_object(struct recovery_obj_work *row)
 {
 	uint64_t oid = row->oid;
 
+	sd_debug("try recover object %"PRIx64, oid);
+
 	if (is_erasure_oid(oid))
 		return recover_erasure_object(row);
 	else
@@ -597,7 +600,8 @@ main_fn bool oid_in_recovery(uint64_t oid)
 			return false;
 		}
 
-		if (rinfo->oids[rinfo->done] == oid) {
+		if (xlfind(&oid, rinfo->oids + rinfo->done,
+			   rinfo->next - rinfo->done, oid_cmp)) {
 			if (rinfo->suspended)
 				break;
 			/*
@@ -810,8 +814,13 @@ static void recover_next_object(struct recovery_info *rinfo)
 		return;
 	}
 
+	/* no more objects to be recovered */
+	if (rinfo->next >= rinfo->count)
+		return;
+
 	/* Try recover next object */
 	queue_recovery_work(rinfo);
+	rinfo->next++;
 }
 
 void resume_suspended_recovery(void)
@@ -872,6 +881,22 @@ static void finish_object_list(struct work *work)
 						      struct recovery_list_work,
 						      base);
 	struct recovery_info *rinfo = main_thread_get(current_rinfo);
+	/*
+	 * Rationale for multi-threaded recovery:
+	 * 1. If one node is added, we find that all the VMs on other nodes will
+	 *    get noticeably affected until 50% data is transferred to the new
+	 *    node.
+	 * 2. For node failure, we might not have problems of running VM but the
+	 *    recovery process boost will benefit IO operation of VM with less
+	 *    chances to be blocked for write and also improve reliability.
+	 * 3. For disk failure in node, this is similar to adding a node. All
+	 *    the data on the broken disk will be recovered on other disks in
+	 *    this node. Speedy recoery not only improve data reliability but
+	 *    also cause less writing blocking on the lost data.
+	 *
+	 * We choose md_nr_disks() * 2 threads for recovery, no rationale.
+	 */
+	uint32_t nr_threads = md_nr_disks() * 2;
 
 	rinfo->state = RW_RECOVER_OBJ;
 	rinfo->count = rlw->count;
@@ -887,7 +912,8 @@ static void finish_object_list(struct work *work)
 		return;
 	}
 
-	recover_next_object(rinfo);
+	for (int i = 0; i < nr_threads; i++)
+		recover_next_object(rinfo);
 	return;
 }
 
@@ -1076,7 +1102,7 @@ static void queue_recovery_work(struct recovery_info *rinfo)
 		break;
 	case RW_RECOVER_OBJ:
 		row = xzalloc(sizeof(*row));
-		row->oid = rinfo->oids[rinfo->done];
+		row->oid = rinfo->oids[rinfo->next];
 
 		rw = &row->base;
 		rw->work.fn = recover_object_work;
