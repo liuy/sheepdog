@@ -839,12 +839,6 @@ int main(int argc, char **argv)
 	if (ret)
 		goto cleanup_log;
 
-	ret = create_cluster(port, zone, nr_vnodes, explicit_addr);
-	if (ret) {
-		sd_err("failed to create sheepdog cluster");
-		goto cleanup_log;
-	}
-
 	/* We should init trace for work queue before journal init */
 	ret = wq_trace_init();
 	if (ret) {
@@ -908,6 +902,13 @@ int main(int argc, char **argv)
 	}
 
 	check_host_env();
+
+	ret = create_cluster(port, zone, nr_vnodes, explicit_addr);
+	if (ret) {
+		sd_err("failed to create sheepdog cluster");
+		goto cleanup_log;
+	}
+
 	sd_info("sheepdog daemon (version %s) started", PACKAGE_VERSION);
 
 	while (sys->nr_outstanding_reqs != 0 ||
